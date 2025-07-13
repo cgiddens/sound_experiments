@@ -1,6 +1,7 @@
 use atomic_float::AtomicF32;
 use rodio::{OutputStreamBuilder, Source};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -19,35 +20,51 @@ use std::time::Duration;
 // so,
 // s_PM(t) = A_C * cos(2 * pi * f_C * t + I * sin(2 * pi * (f_C / R_f) * t))
 
+#[derive(Clone)]
 struct WavetableOscillator {
     sample_rate: u32,
     wave_table: Vec<f32>,
     index: f32,
+    amplitude: Arc<AtomicF32>,
     frequency: Arc<AtomicF32>,
+    modulator: Option<Arc<Mutex<WavetableOscillator>>>,
 }
 
 impl WavetableOscillator {
     fn new(
         sample_rate: u32,
         wave_table: Vec<f32>,
+        amplitude: Arc<AtomicF32>,
         frequency: Arc<AtomicF32>,
+        modulator: Option<Arc<Mutex<WavetableOscillator>>>,
     ) -> WavetableOscillator {
         WavetableOscillator {
             sample_rate: sample_rate,
             wave_table: wave_table,
             index: 0.0,
+            amplitude,
             frequency,
+            modulator,
         }
     }
 
     fn get_sample(&mut self) -> f32 {
         let frequency = self.frequency.load(Ordering::Relaxed);
-        let index_increment = frequency * self.wave_table.len() as f32 / self.sample_rate as f32;
+        let amplitude = self.amplitude.load(Ordering::Relaxed);
+
+        let modulator_sample = if let Some(modulator) = &self.modulator {
+            modulator.lock().unwrap().get_sample()
+        } else {
+            0.0
+        };
+
+        let increment = frequency + modulator_sample;
+        let index_increment = increment * self.wave_table.len() as f32 / self.sample_rate as f32;
 
         let sample = self.lerp();
         self.index += index_increment;
         self.index %= self.wave_table.len() as f32;
-        return sample;
+        return amplitude * sample;
     }
 
     fn lerp(&self) -> f32 {
@@ -96,18 +113,42 @@ fn main() {
         wave_table.push((2.0 * std::f32::consts::PI * n as f32 / wave_table_size as f32).sin());
     }
 
-    let frequency = Arc::new(AtomicF32::new(440.0));
-    let oscillator = WavetableOscillator::new(44100, wave_table, Arc::clone(&frequency));
+    let A_C = Arc::new(AtomicF32::new(1.0));
+    let I = 1.0; // A_M = f_M in this case only
+    let R_f = 4.0; // modulator 4x below carrier
+    let f_C = Arc::new(AtomicF32::new(440.0));
+    let f_M = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) / R_f));
+    let A_M = Arc::new(AtomicF32::new(I * f_M.load(Ordering::Relaxed)));
+
+    let modulator = WavetableOscillator::new(
+        44100,
+        wave_table.clone(),
+        Arc::clone(&A_M),
+        Arc::clone(&f_M),
+        None,
+    );
+    let modulator_for_carrier = Arc::new(Mutex::new(modulator.clone()));
+    let carrier = WavetableOscillator::new(
+        44100,
+        wave_table,
+        Arc::clone(&A_C),
+        Arc::clone(&f_C),
+        Some(Arc::clone(&modulator_for_carrier)),
+    );
 
     let Ok(stream_handle) = OutputStreamBuilder::open_default_stream() else {
         todo!()
     };
 
-    stream_handle.mixer().add(oscillator);
+    stream_handle.mixer().add(carrier);
+    stream_handle.mixer().add(modulator);
 
     for _i in 0..1000 {
-        let current_freq = frequency.load(Ordering::Relaxed);
-        frequency.store(current_freq + 1.0, Ordering::Relaxed);
+        let mut current_freq = f_C.load(Ordering::Relaxed);
+        current_freq += 1.0;
+        f_C.store(current_freq, Ordering::Relaxed);
+        f_M.store(current_freq / R_f, Ordering::Relaxed);
+        A_M.store(I * f_M.load(Ordering::Relaxed), Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(5));
     }
 }

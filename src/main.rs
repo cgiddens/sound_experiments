@@ -115,7 +115,7 @@ fn main() {
 
     let A_C = Arc::new(AtomicF32::new(1.0));
     let I = 1.0; // A_M = f_M in this case only
-    let R_f = 4.0; // modulator 4x below carrier
+    let R_f = 7.0; // modulator 7x below carrier
     let f_C = Arc::new(AtomicF32::new(440.0));
     let f_M = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) / R_f));
     let A_M = Arc::new(AtomicF32::new(I * f_M.load(Ordering::Relaxed)));
@@ -127,13 +127,12 @@ fn main() {
         Arc::clone(&f_M),
         None,
     );
-    let modulator_for_carrier = Arc::new(Mutex::new(modulator.clone()));
     let carrier = WavetableOscillator::new(
         44100,
         wave_table,
         Arc::clone(&A_C),
         Arc::clone(&f_C),
-        Some(Arc::clone(&modulator_for_carrier)),
+        Some(Arc::new(Mutex::new(modulator))),
     );
 
     let Ok(stream_handle) = OutputStreamBuilder::open_default_stream() else {
@@ -141,7 +140,6 @@ fn main() {
     };
 
     stream_handle.mixer().add(carrier);
-    stream_handle.mixer().add(modulator);
 
     for _i in 0..1000 {
         let mut current_freq = f_C.load(Ordering::Relaxed);

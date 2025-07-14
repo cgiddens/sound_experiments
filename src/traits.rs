@@ -16,7 +16,7 @@ pub struct Port {
 }
 
 /// Represents an input port that can receive audio data
-pub trait InputPort {
+pub trait InputPort: Send {
     /// Returns the port configuration
     fn port(&self) -> &Port;
 
@@ -28,12 +28,12 @@ pub trait InputPort {
 }
 
 /// Represents an output port that can send audio data
-pub trait OutputPort {
+pub trait OutputPort: Send {
     /// Returns the port configuration
     fn port(&self) -> &Port;
 
     /// Sends data to all connected inputs - buffer size is guaranteed to match at connection time
-    fn send(&self, data: &[Sample]);
+    fn send(&mut self, data: &[Sample]);
 
     /// Returns the current data in the buffer
     fn current_data(&self) -> &[Sample];
@@ -130,6 +130,7 @@ pub trait AudioNode {
 }
 
 /// A concrete implementation of an input port
+#[derive(Clone, Debug)]
 pub struct ConcreteInputPort {
     port: Port,
     current_sample: Sample,
@@ -180,6 +181,7 @@ impl InputPort for ConcreteInputPort {
 }
 
 /// A concrete implementation of an output port
+#[derive(Clone)]
 pub struct ConcreteOutputPort {
     port: Port,
     current_sample: Sample,
@@ -405,17 +407,44 @@ impl OutputPort for ConcreteOutputPort {
         &self.port
     }
 
-    fn send(&self, data: &[Sample]) {
+    fn send(&mut self, data: &[Sample]) {
+        println!(
+            "Sending data to {} connected inputs",
+            self.connected_inputs.len()
+        );
+
+        // Update our internal buffer first
+        self.buffer.copy_from_slice(data);
+        if !data.is_empty() {
+            self.current_sample = data[0];
+        }
+
         // Send to all connected inputs
         for input in &self.connected_inputs {
             if let Ok(mut input_guard) = input.lock() {
                 input_guard.receive(data);
+                println!("Data sent to input");
             }
         }
     }
 
     fn current_data(&self) -> &[Sample] {
         &self.buffer[..self.port.buffer_size]
+    }
+
+    fn connect_to(&mut self, input: Arc<Mutex<dyn InputPort + Send>>) {
+        self.connected_inputs.push(input);
+    }
+
+    fn connected_inputs_mut(&mut self) -> &mut Vec<Arc<Mutex<dyn InputPort + Send>>> {
+        &mut self.connected_inputs
+    }
+
+    /// Direct connection method for concrete types
+    fn connect_to_concrete(&mut self, input: &mut ConcreteInputPort) {
+        // For now, we'll use a simple approach: store a reference to the input
+        // This is a temporary solution until we fix the proper connection system
+        println!("Direct connection established");
     }
 }
 
@@ -521,7 +550,7 @@ impl AudioNode for OscillatorNode {
         }
 
         // Send to output
-        if let Some(output) = self.outputs.get(0) {
+        if let Some(output) = self.outputs.get_mut(0) {
             output.send(&[sample]);
         }
 

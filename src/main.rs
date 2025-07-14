@@ -1,3 +1,5 @@
+mod traits;
+
 use atomic_float::AtomicF32;
 use hound::{SampleFormat, WavSpec};
 use rodio::{ChannelCount, OutputStreamBuilder, Source};

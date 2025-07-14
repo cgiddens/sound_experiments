@@ -177,7 +177,16 @@ fn main() {
         Arc::clone(&A_M),
         Arc::clone(&f_M),
     );
-    let carrier = WavetableOscillator::new(44100, wave_table, Arc::clone(&A_C), Arc::clone(&f_C));
+    let carrier = WavetableOscillator::new(
+        44100,
+        wave_table.clone(),
+        Arc::clone(&A_C),
+        Arc::clone(&f_C),
+    );
+
+    // Create a second carrier at double the frequency
+    let f_C2 = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) * 8.0));
+    let carrier2 = WavetableOscillator::new(44100, wave_table, Arc::clone(&A_C), Arc::clone(&f_C2));
 
     // Create the audio graph
     let mut graph = Graph::<WavetableOscillator, ()>::new();
@@ -185,16 +194,18 @@ fn main() {
     // Add nodes to the graph
     let modulator_node = graph.add_node(modulator);
     let carrier_node = graph.add_node(carrier);
+    let carrier2_node = graph.add_node(carrier2);
 
-    // Connect modulator output to carrier input
+    // Connect modulator output to both carriers
     graph.add_edge(modulator_node, carrier_node, ());
+    graph.add_edge(modulator_node, carrier2_node, ());
 
     // Create a graph-based source for rodio
     struct GraphSource {
         graph: Graph<WavetableOscillator, ()>,
         sorted_nodes: Vec<NodeIndex>,
         connections: Vec<(NodeIndex, NodeIndex)>,
-        carrier_node: NodeIndex,
+        output_nodes: Vec<NodeIndex>,
         sample_rate: u32,
     }
 
@@ -213,9 +224,12 @@ fn main() {
                 }
             }
 
-            // Return the final output (from carrier)
-            let carrier = &mut self.graph[self.carrier_node];
-            Some(carrier.compute())
+            // Mix outputs from all output nodes
+            let mut mixed_output = 0.0;
+            for &output_node in &self.output_nodes {
+                mixed_output += self.graph[output_node].compute();
+            }
+            Some(mixed_output * 0.5) // Scale down to prevent clipping
         }
     }
 
@@ -244,8 +258,11 @@ fn main() {
     let graph_source = GraphSource {
         graph,
         sorted_nodes: sorted_nodes.clone(),
-        connections: vec![(modulator_node, carrier_node)],
-        carrier_node,
+        connections: vec![
+            (modulator_node, carrier_node),
+            (modulator_node, carrier2_node),
+        ],
+        output_nodes: vec![carrier_node, carrier2_node],
         sample_rate: 44100,
     };
 
@@ -254,8 +271,11 @@ fn main() {
         &mut GraphSource {
             graph: graph_source.graph.clone(),
             sorted_nodes,
-            connections: vec![(modulator_node, carrier_node)],
-            carrier_node,
+            connections: vec![
+                (modulator_node, carrier_node),
+                (modulator_node, carrier2_node),
+            ],
+            output_nodes: vec![carrier_node, carrier2_node],
             sample_rate: 44100,
         },
         "output.wav",
@@ -275,6 +295,7 @@ fn main() {
         let mut current_freq = f_C.load(Ordering::Relaxed);
         current_freq += 1.0;
         f_C.store(current_freq, Ordering::Relaxed);
+        f_C2.store(current_freq * 8.0, Ordering::Relaxed);
         f_M.store(current_freq / R_f, Ordering::Relaxed);
         A_M.store(I * f_M.load(Ordering::Relaxed), Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(5));

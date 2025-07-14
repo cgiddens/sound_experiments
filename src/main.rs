@@ -54,12 +54,14 @@ impl WavetableOscillator {
         let frequency = self.frequency.load(Ordering::Relaxed);
         let amplitude = self.amplitude.load(Ordering::Relaxed);
 
+        // walk modulator chain
         let modulator_sample = if let Some(modulator) = &self.modulator {
             modulator.lock().unwrap().get_sample()
         } else {
             0.0
         };
 
+        // calculate final phase as carrier phase + modulator signal
         let increment = frequency + modulator_sample;
         let index_increment = increment * self.wave_table.len() as f32 / self.sample_rate as f32;
 
@@ -81,6 +83,7 @@ impl WavetableOscillator {
     }
 }
 
+// Iterator implementation required to be a rodio Source
 impl Iterator for WavetableOscillator {
     type Item = f32;
 
@@ -98,6 +101,7 @@ impl Source for WavetableOscillator {
         self.sample_rate
     }
 
+    // returns # of samples until end of source
     fn current_span_len(&self) -> Option<usize> {
         None // never stops playing
     }
@@ -141,15 +145,29 @@ fn main() {
     let wave_table_size = 64;
     let mut wave_table: Vec<f32> = Vec::with_capacity(wave_table_size);
 
+    // render sine to wavetable
     for n in 0..wave_table_size {
         wave_table.push((2.0 * std::f32::consts::PI * n as f32 / wave_table_size as f32).sin());
     }
 
+    // define parameters
+
+    // carrier amplitude
     let A_C = Arc::new(AtomicF32::new(1.0));
+
+    // modulation index (A_M / f_M)
     let I = 16.0; // A_M = f_M in this case only
+
+    // frequency ration (f_C / f_M)
     let R_f = 14.0; // modulator 7x below carrier
+
+    // carrier frequency
     let f_C = Arc::new(AtomicF32::new(440.0));
+
+    // modulator frequency
     let f_M = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) / R_f));
+
+    // modulator amplitude, calculated from I
     let A_M = Arc::new(AtomicF32::new(I * f_M.load(Ordering::Relaxed)));
 
     let modulator = WavetableOscillator::new(
@@ -167,15 +185,18 @@ fn main() {
         Some(Arc::new(Mutex::new(modulator))),
     );
 
+    // render to wav
     output_to_wav(&mut carrier, "output.wav", Duration::from_secs(5))
         .expect("Failed to write to wav");
 
+    // play audio
     let Ok(stream_handle) = OutputStreamBuilder::open_default_stream() else {
         todo!()
     };
 
     stream_handle.mixer().add(carrier);
 
+    // adjust parameters over time
     for _i in 0..1000 {
         let mut current_freq = f_C.load(Ordering::Relaxed);
         current_freq += 1.0;

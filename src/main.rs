@@ -163,12 +163,10 @@ impl AudioNode for WavetableOscillator {
 
         // Compute the next sample
         let sample = self.get_sample();
-        println!("Computed sample: {}", sample);
 
         // Send to output
         if let Some(output) = self.outputs.get_mut(0) {
             output.send(&[sample]);
-            println!("Sent sample to output");
         }
 
         Ok(())
@@ -335,15 +333,6 @@ fn main() {
                     return None;
                 }
 
-                // Debug: print what each node computed
-                if let Some(output) = node_guard.output(0) {
-                    println!(
-                        "Node {:?} computed: {}",
-                        node_index,
-                        output.current_data()[0]
-                    );
-                }
-
                 // Transfer data to connected nodes
                 for (from_node, to_node) in &self.connections {
                     if from_node == node_index {
@@ -358,7 +347,6 @@ fn main() {
                         let to_node = &self.graph[*to_node];
                         let mut to_node_guard = to_node.lock().unwrap();
                         to_node_guard.inputs[0].receive(&[output_data]);
-                        println!("Transferred sample {} from node to node", output_data);
                     }
                 }
             }
@@ -372,7 +360,6 @@ fn main() {
 
             if let Some(output) = carrier_guard.output(0) {
                 let sample = output.current_data()[0];
-                println!("Final output: {}", sample);
                 Some(sample)
             } else {
                 Some(0.0)

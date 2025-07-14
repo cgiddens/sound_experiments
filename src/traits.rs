@@ -37,6 +37,15 @@ pub trait OutputPort: Send {
 
     /// Returns the current data in the buffer
     fn current_data(&self) -> &[Sample];
+
+    /// Connects this output to an input port
+    fn connect_to(&mut self, input: Arc<Mutex<dyn InputPort + Send>>);
+
+    /// Gets a mutable reference to the connected inputs (for direct manipulation)
+    fn connected_inputs_mut(&mut self) -> &mut Vec<Arc<Mutex<dyn InputPort + Send>>>;
+
+    /// Direct connection method for concrete types
+    fn connect_to_concrete(&mut self, input: &mut ConcreteInputPort);
 }
 
 /// Error when trying to connect ports with mismatched buffer sizes
@@ -408,11 +417,6 @@ impl OutputPort for ConcreteOutputPort {
     }
 
     fn send(&mut self, data: &[Sample]) {
-        println!(
-            "Sending data to {} connected inputs",
-            self.connected_inputs.len()
-        );
-
         // Update our internal buffer first
         self.buffer.copy_from_slice(data);
         if !data.is_empty() {
@@ -423,7 +427,6 @@ impl OutputPort for ConcreteOutputPort {
         for input in &self.connected_inputs {
             if let Ok(mut input_guard) = input.lock() {
                 input_guard.receive(data);
-                println!("Data sent to input");
             }
         }
     }
@@ -444,128 +447,5 @@ impl OutputPort for ConcreteOutputPort {
     fn connect_to_concrete(&mut self, input: &mut ConcreteInputPort) {
         // For now, we'll use a simple approach: store a reference to the input
         // This is a temporary solution until we fix the proper connection system
-        println!("Direct connection established");
-    }
-}
-
-/// Example implementation of an oscillator node
-pub struct OscillatorNode {
-    sample_rate: u32,
-    inputs: Vec<ConcreteInputPort>,
-    outputs: Vec<ConcreteOutputPort>,
-    phase: f32,
-    frequency: f32,
-    amplitude: f32,
-    active: bool,
-}
-
-impl OscillatorNode {
-    pub fn new(sample_rate: u32) -> Self {
-        let mut inputs = Vec::new();
-        inputs.push(ConcreteInputPort::new(
-            "frequency".to_string(),
-            sample_rate,
-            1,
-        ));
-        inputs.push(ConcreteInputPort::new(
-            "amplitude".to_string(),
-            sample_rate,
-            1,
-        ));
-
-        let mut outputs = Vec::new();
-        outputs.push(ConcreteOutputPort::new(
-            "output".to_string(),
-            sample_rate,
-            1,
-        ));
-
-        Self {
-            sample_rate,
-            inputs,
-            outputs,
-            phase: 0.0,
-            frequency: 440.0,
-            amplitude: 1.0,
-            active: true,
-        }
-    }
-}
-
-impl AudioNode for OscillatorNode {
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    fn input_count(&self) -> usize {
-        self.inputs.len()
-    }
-
-    fn output_count(&self) -> usize {
-        self.outputs.len()
-    }
-
-    fn input(&self, index: usize) -> Option<&dyn InputPort> {
-        self.inputs.get(index).map(|input| input as &dyn InputPort)
-    }
-
-    fn input_mut(&mut self, index: usize) -> Option<&mut dyn InputPort> {
-        self.inputs
-            .get_mut(index)
-            .map(|input| input as &mut dyn InputPort)
-    }
-
-    fn output(&self, index: usize) -> Option<&dyn OutputPort> {
-        self.outputs
-            .get(index)
-            .map(|output| output as &dyn OutputPort)
-    }
-
-    fn output_mut(&mut self, index: usize) -> Option<&mut dyn OutputPort> {
-        self.outputs
-            .get_mut(index)
-            .map(|output| output as &mut dyn OutputPort)
-    }
-
-    fn compute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.active {
-            return Ok(());
-        }
-
-        // Update frequency and amplitude from inputs
-        if let Some(freq_input) = self.inputs.get(0) {
-            self.frequency = freq_input.current_data()[0];
-        }
-        if let Some(amp_input) = self.inputs.get(1) {
-            self.amplitude = amp_input.current_data()[0];
-        }
-
-        // Compute next sample using sine wave
-        let sample = self.amplitude * (2.0 * std::f32::consts::PI * self.phase).sin();
-
-        // Update phase
-        self.phase += self.frequency / self.sample_rate as f32;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
-
-        // Send to output
-        if let Some(output) = self.outputs.get_mut(0) {
-            output.send(&[sample]);
-        }
-
-        Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.phase = 0.0;
-    }
-
-    fn is_active(&self) -> bool {
-        self.active
-    }
-
-    fn set_active(&mut self, active: bool) {
-        self.active = active;
     }
 }

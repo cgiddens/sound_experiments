@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 rodio = "0.21.0"
 atomic_float = "0.1"
+hound = "3.3.1"

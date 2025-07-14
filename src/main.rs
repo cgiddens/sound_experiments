@@ -1,5 +1,7 @@
 use atomic_float::AtomicF32;
-use rodio::{OutputStreamBuilder, Source};
+use hound::{SampleFormat, WavSpec};
+use rodio::{ChannelCount, OutputStreamBuilder, Source};
+use std::path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -105,6 +107,35 @@ impl Source for WavetableOscillator {
     }
 }
 
+pub fn output_to_wav(
+    source: &mut impl Source,
+    wav_file: impl AsRef<path::Path>,
+    duration: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let format = WavSpec {
+        channels: source.channels() as ChannelCount,
+        sample_rate: source.sample_rate(),
+        bits_per_sample: 32,
+        sample_format: SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(wav_file, format)?;
+
+    // Calculate total samples needed
+    let total_samples = (duration.as_secs_f32() * source.sample_rate() as f32) as usize;
+
+    // Iterate for exactly the number of samples we need
+    for _ in 0..total_samples {
+        if let Some(sample) = source.next() {
+            writer.write_sample(sample)?;
+        } else {
+            break; // Source ended early
+        }
+    }
+
+    writer.finalize()?;
+    Ok(())
+}
+
 #[allow(non_snake_case)]
 fn main() {
     let wave_table_size = 64;
@@ -115,8 +146,8 @@ fn main() {
     }
 
     let A_C = Arc::new(AtomicF32::new(1.0));
-    let I = 1.0; // A_M = f_M in this case only
-    let R_f = 7.0; // modulator 7x below carrier
+    let I = 16.0; // A_M = f_M in this case only
+    let R_f = 14.0; // modulator 7x below carrier
     let f_C = Arc::new(AtomicF32::new(440.0));
     let f_M = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) / R_f));
     let A_M = Arc::new(AtomicF32::new(I * f_M.load(Ordering::Relaxed)));
@@ -128,13 +159,16 @@ fn main() {
         Arc::clone(&f_M),
         None,
     );
-    let carrier = WavetableOscillator::new(
+    let mut carrier = WavetableOscillator::new(
         44100,
         wave_table,
         Arc::clone(&A_C),
         Arc::clone(&f_C),
         Some(Arc::new(Mutex::new(modulator))),
     );
+
+    output_to_wav(&mut carrier, "output.wav", Duration::from_secs(5))
+        .expect("Failed to write to wav");
 
     let Ok(stream_handle) = OutputStreamBuilder::open_default_stream() else {
         todo!()

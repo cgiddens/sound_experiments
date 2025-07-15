@@ -1,7 +1,18 @@
+TODO:
  [ ] Add clipping
- [ ] Do I need to protect from aliasing?
+ [ ] Figure out: do I need to protect from aliasing?
+ [ ] Add GUI
+ [ ] Add MIDI and/or keyboard input
+ [ ] Integrate into nih-plug?
 
-DONE
+FUTURE IDEAS:
+ [ ] Hard sync
+ [ ] Filters
+ [ ] EQ
+ [ ] Resonators
+ [ ] Physical modeling (Karplus-Strong, resonating body)
+
+DONE:
  [x] Create single wavetable oscillator
  [x] Add single modulator input
  [x] Implement phase modulation algorithm

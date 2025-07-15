@@ -153,6 +153,57 @@ pub fn output_to_wav(
     Ok(())
 }
 
+// Create a graph-based source for rodio
+struct GraphSource {
+    graph: Graph<WavetableOscillator, ()>,
+    sorted_nodes: Vec<NodeIndex>,
+    connections: Vec<(NodeIndex, NodeIndex)>,
+    output_nodes: Vec<NodeIndex>,
+    sample_rate: u32,
+}
+
+impl Iterator for GraphSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        // Process each node in pre-computed order
+        for node_index in &self.sorted_nodes {
+            // Transfer data to connected nodes
+            for (from_node, to_node) in &self.connections {
+                if from_node == node_index {
+                    let modulator_sample = self.graph[*from_node].compute();
+                    self.graph[*to_node].set_modulator_input(modulator_sample);
+                }
+            }
+        }
+
+        // Mix outputs from all output nodes
+        let mut mixed_output = 0.0;
+        for &output_node in &self.output_nodes {
+            mixed_output += self.graph[output_node].compute();
+        }
+        Some(mixed_output * 0.5) // Scale down to prevent clipping
+    }
+}
+
+impl Source for GraphSource {
+    fn channels(&self) -> u16 {
+        1
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
 #[allow(non_snake_case)]
 fn main() {
     let wave_table_size = 64;
@@ -200,57 +251,6 @@ fn main() {
     graph.add_edge(modulator_node, carrier_node, ());
     graph.add_edge(modulator_node, carrier2_node, ());
 
-    // Create a graph-based source for rodio
-    struct GraphSource {
-        graph: Graph<WavetableOscillator, ()>,
-        sorted_nodes: Vec<NodeIndex>,
-        connections: Vec<(NodeIndex, NodeIndex)>,
-        output_nodes: Vec<NodeIndex>,
-        sample_rate: u32,
-    }
-
-    impl Iterator for GraphSource {
-        type Item = f32;
-
-        fn next(&mut self) -> Option<f32> {
-            // Process each node in pre-computed order
-            for node_index in &self.sorted_nodes {
-                // Transfer data to connected nodes
-                for (from_node, to_node) in &self.connections {
-                    if from_node == node_index {
-                        let modulator_sample = self.graph[*from_node].compute();
-                        self.graph[*to_node].set_modulator_input(modulator_sample);
-                    }
-                }
-            }
-
-            // Mix outputs from all output nodes
-            let mut mixed_output = 0.0;
-            for &output_node in &self.output_nodes {
-                mixed_output += self.graph[output_node].compute();
-            }
-            Some(mixed_output * 0.5) // Scale down to prevent clipping
-        }
-    }
-
-    impl Source for GraphSource {
-        fn channels(&self) -> u16 {
-            1
-        }
-
-        fn sample_rate(&self) -> u32 {
-            self.sample_rate
-        }
-
-        fn current_span_len(&self) -> Option<usize> {
-            None
-        }
-
-        fn total_duration(&self) -> Option<Duration> {
-            None
-        }
-    }
-
     // Compute topological sort once
     let sorted_nodes = toposort(&graph, None).expect("Graph has cycles");
 
@@ -288,16 +288,16 @@ fn main() {
         todo!()
     };
 
-    stream_handle.mixer().add(graph_source);
+    // stream_handle.mixer().add(graph_source);
 
-    // adjust parameters over time
-    for _i in 0..1000 {
-        let mut current_freq = f_C.load(Ordering::Relaxed);
-        current_freq += 1.0;
-        f_C.store(current_freq, Ordering::Relaxed);
-        f_C2.store(current_freq * 8.0, Ordering::Relaxed);
-        f_M.store(current_freq / R_f, Ordering::Relaxed);
-        A_M.store(I * f_M.load(Ordering::Relaxed), Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // // adjust parameters over time
+    // for _i in 0..1000 {
+    //     let mut current_freq = f_C.load(Ordering::Relaxed);
+    //     current_freq += 1.0;
+    //     f_C.store(current_freq, Ordering::Relaxed);
+    //     f_C2.store(current_freq * 8.0, Ordering::Relaxed);
+    //     f_M.store(current_freq / R_f, Ordering::Relaxed);
+    //     A_M.store(I * f_M.load(Ordering::Relaxed), Ordering::Relaxed);
+    //     std::thread::sleep(Duration::from_millis(5));
+    // }
 }

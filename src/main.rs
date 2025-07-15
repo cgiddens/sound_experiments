@@ -32,8 +32,8 @@ struct WavetableOscillator {
     index: f32,
     amplitude: Arc<AtomicF32>,
     frequency: Arc<AtomicF32>,
-    modulator_input: Option<f32>,
-    active: bool,
+    modulator_inputs: Vec<f32>, // Strided: [mod0_sample0, mod0_sample1, ..., mod1_sample0, mod1_sample1, ...]
+    buffer_size: usize,
 }
 
 impl WavetableOscillator {
@@ -49,13 +49,31 @@ impl WavetableOscillator {
             index: 0.0,
             amplitude,
             frequency,
-            modulator_input: None,
-            active: true,
+            modulator_inputs: Vec::new(),
+            buffer_size: 1, // Default to single sample
         }
     }
 
-    fn set_modulator_input(&mut self, input: f32) {
-        self.modulator_input = Some(input);
+    fn set_modulator_input(&mut self, modulator_index: usize, input: f32) {
+        // Ensure we have enough space for this modulator
+        let needed_size = (modulator_index + 1) * self.buffer_size;
+        if self.modulator_inputs.len() < needed_size {
+            self.modulator_inputs.resize(needed_size, 0.0);
+        }
+        self.modulator_inputs[modulator_index * self.buffer_size] = input;
+    }
+
+    fn get_modulator_sum(&self) -> f32 {
+        let mut sum = 0.0;
+        let modulator_count = self.modulator_inputs.len() / self.buffer_size;
+        for mod_idx in 0..modulator_count {
+            sum += self.modulator_inputs[mod_idx * self.buffer_size];
+        }
+        sum
+    }
+
+    fn clear_modulator_inputs(&mut self) {
+        self.modulator_inputs.fill(0.0);
     }
 
     fn lerp(&self) -> f32 {
@@ -72,18 +90,14 @@ impl WavetableOscillator {
 
 impl AudioNode for WavetableOscillator {
     fn compute(&mut self) -> Sample {
-        if !self.active {
-            return 0.0;
-        }
-
         let frequency = self.frequency.load(Ordering::Relaxed);
         let amplitude = self.amplitude.load(Ordering::Relaxed);
 
-        // Get modulator input if available
-        let modulator_sample = self.modulator_input.unwrap_or(0.0);
+        // Sum all modulator inputs (this is the key to proper FM synthesis)
+        let modulator_sum = self.get_modulator_sum();
 
         // Calculate final phase as carrier phase + modulator signal
-        let increment = frequency + modulator_sample;
+        let increment = frequency + modulator_sum;
         let index_increment = increment * self.wave_table.len() as f32 / self.sample_rate as f32;
 
         let sample = self.lerp();
@@ -95,7 +109,7 @@ impl AudioNode for WavetableOscillator {
 
     fn reset(&mut self) {
         self.index = 0.0;
-        self.modulator_input = None;
+        self.modulator_inputs.clear();
     }
 }
 
@@ -157,7 +171,7 @@ pub fn output_to_wav(
 struct GraphSource {
     graph: Graph<WavetableOscillator, ()>,
     sorted_nodes: Vec<NodeIndex>,
-    connections: Vec<(NodeIndex, NodeIndex)>,
+    connections: Vec<(NodeIndex, NodeIndex, usize)>, // (from, to, modulator_index)
     output_nodes: Vec<NodeIndex>,
     sample_rate: u32,
 }
@@ -166,13 +180,18 @@ impl Iterator for GraphSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        // Clear all modulator inputs at the start of each frame
+        for node_index in &self.sorted_nodes {
+            self.graph[*node_index].clear_modulator_inputs();
+        }
+
         // Process each node in pre-computed order
         for node_index in &self.sorted_nodes {
             // Transfer data to connected nodes
-            for (from_node, to_node) in &self.connections {
+            for (from_node, to_node, modulator_index) in &self.connections {
                 if from_node == node_index {
                     let modulator_sample = self.graph[*from_node].compute();
-                    self.graph[*to_node].set_modulator_input(modulator_sample);
+                    self.graph[*to_node].set_modulator_input(*modulator_index, modulator_sample);
                 }
             }
         }
@@ -217,10 +236,15 @@ fn main() {
     // Define parameters
     let A_C = Arc::new(AtomicF32::new(1.0));
     let I = 16.0;
+    let I2 = 128.0;
     let R_f = 14.0;
+    let R_f2 = 64.0;
     let f_C = Arc::new(AtomicF32::new(440.0));
+    let f_C2 = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) * 8.0));
     let f_M = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) / R_f));
+    let f_M2 = Arc::new(AtomicF32::new(f_C2.load(Ordering::Relaxed) / R_f2));
     let A_M = Arc::new(AtomicF32::new(I * f_M.load(Ordering::Relaxed)));
+    let A_M2 = Arc::new(AtomicF32::new(I2 * f_M2.load(Ordering::Relaxed)));
 
     let modulator = WavetableOscillator::new(
         44100,
@@ -228,15 +252,18 @@ fn main() {
         Arc::clone(&A_M),
         Arc::clone(&f_M),
     );
+    let modulator2 = WavetableOscillator::new(
+        44100,
+        wave_table.clone(),
+        Arc::clone(&A_M2),
+        Arc::clone(&f_M2),
+    );
     let carrier = WavetableOscillator::new(
         44100,
         wave_table.clone(),
         Arc::clone(&A_C),
         Arc::clone(&f_C),
     );
-
-    // Create a second carrier at double the frequency
-    let f_C2 = Arc::new(AtomicF32::new(f_C.load(Ordering::Relaxed) * 8.0));
     let carrier2 = WavetableOscillator::new(44100, wave_table, Arc::clone(&A_C), Arc::clone(&f_C2));
 
     // Create the audio graph
@@ -244,12 +271,14 @@ fn main() {
 
     // Add nodes to the graph
     let modulator_node = graph.add_node(modulator);
+    let modulator2_node = graph.add_node(modulator2);
     let carrier_node = graph.add_node(carrier);
     let carrier2_node = graph.add_node(carrier2);
 
-    // Connect modulator output to both carriers
+    // Connect modulator to carrier, modulator2 to carrier2
     graph.add_edge(modulator_node, carrier_node, ());
     graph.add_edge(modulator_node, carrier2_node, ());
+    graph.add_edge(modulator2_node, carrier2_node, ());
 
     // Compute topological sort once
     let sorted_nodes = toposort(&graph, None).expect("Graph has cycles");
@@ -259,8 +288,9 @@ fn main() {
         graph,
         sorted_nodes: sorted_nodes.clone(),
         connections: vec![
-            (modulator_node, carrier_node),
-            (modulator_node, carrier2_node),
+            (modulator_node, carrier_node, 0), // modulator -> carrier (index 0)
+            (modulator_node, carrier2_node, 0), // modulator -> carrier2 (index 0)
+            (modulator2_node, carrier2_node, 1), // modulator2 -> carrier2 (index 1)
         ],
         output_nodes: vec![carrier_node, carrier2_node],
         sample_rate: 44100,
@@ -272,8 +302,9 @@ fn main() {
             graph: graph_source.graph.clone(),
             sorted_nodes,
             connections: vec![
-                (modulator_node, carrier_node),
-                (modulator_node, carrier2_node),
+                (modulator_node, carrier_node, 0), // modulator -> carrier (index 0)
+                (modulator_node, carrier2_node, 0), // modulator -> carrier2 (index 0)
+                (modulator2_node, carrier2_node, 1), // modulator2 -> carrier2 (index 1)
             ],
             output_nodes: vec![carrier_node, carrier2_node],
             sample_rate: 44100,

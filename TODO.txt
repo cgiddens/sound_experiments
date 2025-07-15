@@ -1,0 +1,9 @@
+ [ ] Add clipping
+ [ ] Do I need to protect from aliasing?
+
+DONE
+ [x] Create single wavetable oscillator
+ [x] Add single modulator input
+ [x] Implement phase modulation algorithm
+ [x] Migrate oscillator to graph node; implement data transfer on edges
+ [x] Add support for one-to-many, many-to-one

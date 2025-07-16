@@ -376,7 +376,7 @@ impl Plugin for FMSynth {
         },
     ];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
 
     type SysExMessage = ();
@@ -415,7 +415,6 @@ impl Plugin for FMSynth {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let mut next_event = context.next_event();
-        static mut DEBUG_COUNTER: u32 = 0;
 
         for (sample_id, channel_samples) in buffer.iter_samples().enumerate() {
             // Handle MIDI events
@@ -426,7 +425,6 @@ impl Plugin for FMSynth {
 
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
-                        println!("MIDI Note On: note={}, velocity={}", note, velocity);
                         self.midi_note_id = note;
                         self.midi_note_freq = util::midi_note_to_freq(note);
                         self.midi_note_gain.set_target(self.sample_rate, velocity);
@@ -438,7 +436,6 @@ impl Plugin for FMSynth {
                         self.rebuild_synth();
                     }
                     NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
-                        println!("MIDI Note Off: note={}", note);
                         self.midi_note_gain.set_target(self.sample_rate, 0.0);
                     }
                     _ => (),
@@ -462,17 +459,6 @@ impl Plugin for FMSynth {
 
             let final_output =
                 (synth_output * midi_gain + test_tone) * util::db_to_gain_fast(master_gain);
-
-            // Debug output every 1000 samples
-            unsafe {
-                DEBUG_COUNTER += 1;
-                if DEBUG_COUNTER % 1000 == 0 {
-                    println!(
-                        "Audio: synth={:.3}, midi_gain={:.3}, master_gain={:.3}, final={:.3}",
-                        synth_output, midi_gain, master_gain, final_output
-                    );
-                }
-            }
 
             for sample in channel_samples {
                 *sample = final_output;
@@ -512,7 +498,7 @@ impl Plugin for FMSynth {
                     // Show some debug info
                     ui.label("Debug Info:");
                     ui.label("• GUI is working");
-                    ui.label("• Try pressing keys on your keyboard");
+                    ui.label("• Try pressing keys on your keyboard (A-Z for notes)");
                     ui.label("• Check your system audio settings");
                 });
             },

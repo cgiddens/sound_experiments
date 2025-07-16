@@ -9,6 +9,17 @@ members = ["xtask"]
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[profile.dev]
+opt-level = 3
+debug = false
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
 [dependencies]
 rodio = "0.21.0"
 atomic_float = "0.1"

@@ -415,6 +415,7 @@ impl Plugin for FMSynth {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let mut next_event = context.next_event();
+        static mut DEBUG_COUNTER: u32 = 0;
 
         for (sample_id, channel_samples) in buffer.iter_samples().enumerate() {
             // Handle MIDI events
@@ -425,6 +426,7 @@ impl Plugin for FMSynth {
 
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
+                        println!("MIDI Note On: note={}, velocity={}", note, velocity);
                         self.midi_note_id = note;
                         self.midi_note_freq = util::midi_note_to_freq(note);
                         self.midi_note_gain.set_target(self.sample_rate, velocity);
@@ -436,6 +438,7 @@ impl Plugin for FMSynth {
                         self.rebuild_synth();
                     }
                     NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
+                        println!("MIDI Note Off: note={}", note);
                         self.midi_note_gain.set_target(self.sample_rate, 0.0);
                     }
                     _ => (),
@@ -448,7 +451,28 @@ impl Plugin for FMSynth {
             let master_gain = self.params.master_gain.smoothed.next();
             let synth_output = self.process_frame();
             let midi_gain = self.midi_note_gain.next();
-            let final_output = synth_output * midi_gain * util::db_to_gain_fast(master_gain);
+
+            // Add a small test tone if no MIDI input
+            let test_tone = if midi_gain < 0.01 {
+                0.1 * (2.0 * std::f32::consts::PI * 440.0 * sample_id as f32 / self.sample_rate)
+                    .sin()
+            } else {
+                0.0
+            };
+
+            let final_output =
+                (synth_output * midi_gain + test_tone) * util::db_to_gain_fast(master_gain);
+
+            // Debug output every 1000 samples
+            unsafe {
+                DEBUG_COUNTER += 1;
+                if DEBUG_COUNTER % 1000 == 0 {
+                    println!(
+                        "Audio: synth={:.3}, midi_gain={:.3}, master_gain={:.3}, final={:.3}",
+                        synth_output, midi_gain, master_gain, final_output
+                    );
+                }
+            }
 
             for sample in channel_samples {
                 *sample = final_output;
@@ -459,12 +483,39 @@ impl Plugin for FMSynth {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Minimal blank GUI
+        // Create a GUI with parameter controls
+        let params = self.params.clone();
         create_egui_editor(
             self.params.editor_state.clone(),
             (),
             |_, _| {},
-            |_egui_ctx, _setter, _state| {},
+            move |egui_ctx, setter, _state| {
+                egui::CentralPanel::default().show(egui_ctx, |ui| {
+                    ui.heading("FM Synth");
+
+                    // Add some basic controls
+                    ui.add(widgets::ParamSlider::for_param(
+                        &params.carrier_frequency,
+                        setter,
+                    ));
+                    ui.add(widgets::ParamSlider::for_param(
+                        &params.modulation_index,
+                        setter,
+                    ));
+                    ui.add(widgets::ParamSlider::for_param(&params.master_gain, setter));
+
+                    // Add a test tone button
+                    if ui.button("Test Tone (440Hz)").clicked() {
+                        println!("Test tone button clicked!");
+                    }
+
+                    // Show some debug info
+                    ui.label("Debug Info:");
+                    ui.label("• GUI is working");
+                    ui.label("• Try pressing keys on your keyboard");
+                    ui.label("• Check your system audio settings");
+                });
+            },
         )
     }
 }

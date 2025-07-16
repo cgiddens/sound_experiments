@@ -3,8 +3,17 @@ name = "sound_experiments"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
 [dependencies]
 rodio = "0.21.0"
 atomic_float = "0.1"
 hound = "3.3.1"
 petgraph = "0.8.2"
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+parking_lot = "0.12"

@@ -651,24 +651,8 @@ impl Plugin for FMSynth {
             let synth_output = self.process_frame();
             let midi_gain = self.midi_note_gain.next();
 
-            // Add a small test tone if no MIDI input
-            let test_tone = if midi_gain < 0.01 {
-                0.1 * (2.0 * std::f32::consts::PI * 440.0 * sample_id as f32 / self.sample_rate)
-                    .sin()
-            } else {
-                0.0
-            };
-
-            let final_output =
-                (synth_output * midi_gain + test_tone) * util::db_to_gain_fast(master_gain);
-
-            // Debug output every 10000 samples (about every 0.2 seconds at 44.1kHz)
-            if sample_id % 10000 == 0 {
-                println!(
-                    "Debug - Carrier: {:.1}Hz, Mod Index: {:.1}, Master: {:.1}dB, Keyboard: {}, Output: {:.3}",
-                    carrier_freq, mod_index, master_gain, keyboard_enabled, final_output
-                );
-            }
+            // Remove constant test tone; output only the synth under MIDI control
+            let final_output = (synth_output * midi_gain) * util::db_to_gain_fast(master_gain);
 
             for sample in channel_samples {
                 *sample = final_output;

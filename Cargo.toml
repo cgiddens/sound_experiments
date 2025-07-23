@@ -28,3 +28,4 @@ petgraph = "0.8.2"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 parking_lot = "0.12"
+winit = "0.29"

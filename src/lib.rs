@@ -6,12 +6,12 @@ use nih_plug_egui::{EguiState, create_egui_editor, egui, widgets};
 use parking_lot::Mutex;
 use petgraph::algo::toposort;
 use petgraph::graph::{Graph, NodeIndex};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use winit::event::{ElementState, Event, WindowEvent};
 use winit::keyboard::KeyCode;
-use std::collections::HashSet;
 
-#[derive(Clone)]
 pub struct WavetableOscillator {
     sample_rate: u32,
     wave_table: Vec<f32>,
@@ -116,6 +116,9 @@ pub struct FMSynth {
     pressed_keys: std::collections::HashSet<KeyCode>,
     is_standalone: bool,
 
+    // Debug info
+    last_midi_event: String,
+
     // Wavetable
     wave_table: Vec<f32>,
 }
@@ -176,6 +179,7 @@ impl Default for FMSynth {
             midi_note_gain: Smoother::new(SmoothingStyle::Linear(5.0)),
             pressed_keys: std::collections::HashSet::new(),
             is_standalone: false, // Will be set in initialize()
+            last_midi_event: String::new(),
             wave_table,
         }
     }
@@ -277,8 +281,17 @@ impl FMSynth {
         self.connections.clear();
         self.output_nodes.clear();
 
-        // Get current parameters
-        let carrier_freq = self.params.carrier_frequency.value();
+        // Get current parameters. By default we take the values from the parameters panel,
+        // but when a MIDI note is active we want the synth to follow that note instead.
+        // The simplest way is to overwrite the carrier's base frequency with the frequency
+        // that belongs to the last received Note On (stored in `self.midi_note_freq`).
+        let mut carrier_freq = self.params.carrier_frequency.value();
+        if self.midi_note_id != 0 {
+            // A non-zero note ID means we have received at least one MIDI Note On. Use its
+            // frequency so that the synth actually tracks incoming MIDI.
+            carrier_freq = self.midi_note_freq;
+        }
+
         let carrier2_freq = self.params.carrier2_frequency.value();
         let mod_ratio = self.params.modulator_ratio.value();
         let mod2_ratio = self.params.modulator2_ratio.value();
@@ -372,24 +385,24 @@ impl FMSynth {
     fn key_to_midi_note(key: KeyCode) -> Option<u8> {
         match key {
             // A-Z keys mapped to notes (A = 60, B = 62, C = 64, etc.)
-            KeyCode::KeyA => Some(60), // Middle C
-            KeyCode::KeyW => Some(61), // C#
-            KeyCode::KeyS => Some(62), // D
-            KeyCode::KeyE => Some(63), // D#
-            KeyCode::KeyD => Some(64), // E
-            KeyCode::KeyF => Some(65), // F
-            KeyCode::KeyT => Some(66), // F#
-            KeyCode::KeyG => Some(67), // G
-            KeyCode::KeyY => Some(68), // G#
-            KeyCode::KeyH => Some(69), // A
-            KeyCode::KeyU => Some(70), // A#
-            KeyCode::KeyJ => Some(71), // B
-            KeyCode::KeyK => Some(72), // High C
-            KeyCode::KeyO => Some(73), // C#
-            KeyCode::KeyL => Some(74), // D
-            KeyCode::KeyP => Some(75), // D#
+            KeyCode::KeyA => Some(60),      // Middle C
+            KeyCode::KeyW => Some(61),      // C#
+            KeyCode::KeyS => Some(62),      // D
+            KeyCode::KeyE => Some(63),      // D#
+            KeyCode::KeyD => Some(64),      // E
+            KeyCode::KeyF => Some(65),      // F
+            KeyCode::KeyT => Some(66),      // F#
+            KeyCode::KeyG => Some(67),      // G
+            KeyCode::KeyY => Some(68),      // G#
+            KeyCode::KeyH => Some(69),      // A
+            KeyCode::KeyU => Some(70),      // A#
+            KeyCode::KeyJ => Some(71),      // B
+            KeyCode::KeyK => Some(72),      // High C
+            KeyCode::KeyO => Some(73),      // C#
+            KeyCode::KeyL => Some(74),      // D
+            KeyCode::KeyP => Some(75),      // D#
             KeyCode::Semicolon => Some(76), // E
-            KeyCode::Quote => Some(77), // F
+            KeyCode::Quote => Some(77),     // F
             _ => None,
         }
     }
@@ -397,7 +410,7 @@ impl FMSynth {
     /// Process keyboard input and generate MIDI events
     fn process_keyboard_input(&mut self) -> Vec<NoteEvent<()>> {
         let mut events = Vec::new();
-        
+
         // Only process keyboard input if enabled and in standalone mode
         if !self.params.keyboard_input_enabled.value() || !self.is_standalone {
             return events;
@@ -406,29 +419,49 @@ impl FMSynth {
         // For now, we'll simulate keyboard input for testing
         // In a real implementation, this would be connected to winit events
         // This is a placeholder that will be replaced with actual event handling
-        
+
         events
     }
 
-    /// Simulate keyboard input for testing
+    /// Simulate a rising chromatic scale so the synth produces a staircase sweep up to ≈1 kHz
+    /// when no external MIDI is connected. One new note every second, 0.5 s on / 0.5 s off.
     fn simulate_keyboard_input(&mut self) -> Vec<NoteEvent<()>> {
         let mut events = Vec::new();
-        
-        // Only process if keyboard input is enabled
+
+        // Bypass if the user disabled keyboard/MIDI testing
         if !self.params.keyboard_input_enabled.value() {
             return events;
         }
 
-        // Simulate pressing 'A' key every 2 seconds for testing
-        let current_time = std::time::SystemTime::now()
+        // Current time in seconds since epoch – granularity is fine for 1 Hz switching
+        let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
-        if current_time % 2 == 0 && !self.pressed_keys.contains(&KeyCode::KeyA) {
-            // Simulate key press
-            self.pressed_keys.insert(KeyCode::KeyA);
-            if let Some(note) = Self::key_to_midi_note(KeyCode::KeyA) {
+
+        // Build a chromatic list: 60 (C4) .. 84 (C6)  →  261 Hz .. 1046 Hz (≈1 kHz)
+        const LOW: u8 = 60;
+        const HIGH: u8 = 84;
+        let span = (HIGH - LOW + 1) as u64; // +1 so HIGH is included
+
+        // Which note are we on right now?
+        let idx = (t % span) as u8;
+        let note = LOW + idx;
+
+        // First half-second of each second = NoteOn, second half = NoteOff
+        let press_phase = (t * 2) % 2 == 0;
+
+        if press_phase {
+            // Only emit NoteOn when it changes to avoid duplicates
+            if self.midi_note_id != note {
+                self.midi_note_id = note;
+                // Rebuild synth so carriers take new frequency
+                self.rebuild_synth();
+                println!(
+                    "Sim note ON  {} ({} Hz)",
+                    note,
+                    util::midi_note_to_freq(note)
+                );
                 events.push(NoteEvent::NoteOn {
                     timing: 0,
                     note,
@@ -436,12 +469,11 @@ impl FMSynth {
                     channel: 0,
                     voice_id: None,
                 });
-                println!("Simulated key press: A -> MIDI note {}", note);
             }
-        } else if current_time % 2 == 1 && self.pressed_keys.contains(&KeyCode::KeyA) {
-            // Simulate key release
-            self.pressed_keys.remove(&KeyCode::KeyA);
-            if let Some(note) = Self::key_to_midi_note(KeyCode::KeyA) {
+        } else {
+            // Emit NoteOff for the current note, then reset so next second will trigger NoteOn
+            if self.midi_note_id == note {
+                println!("Sim note OFF {}", note);
                 events.push(NoteEvent::NoteOff {
                     timing: 0,
                     note,
@@ -449,10 +481,48 @@ impl FMSynth {
                     channel: 0,
                     voice_id: None,
                 });
-                println!("Simulated key release: A -> MIDI note {}", note);
+                self.midi_note_id = 0;
             }
         }
-        
+
+        events
+    }
+
+    /// Handle real keyboard input
+    fn handle_keyboard_event(&mut self, key_code: KeyCode, pressed: bool) -> Vec<NoteEvent<()>> {
+        let mut events = Vec::new();
+
+        // Only process if keyboard input is enabled
+        if !self.params.keyboard_input_enabled.value() {
+            return events;
+        }
+
+        if let Some(note) = Self::key_to_midi_note(key_code) {
+            if pressed && !self.pressed_keys.contains(&key_code) {
+                // Key press
+                self.pressed_keys.insert(key_code);
+                events.push(NoteEvent::NoteOn {
+                    timing: 0,
+                    note,
+                    velocity: 0.8,
+                    channel: 0,
+                    voice_id: None,
+                });
+                println!("Real key press: {:?} -> MIDI note {}", key_code, note);
+            } else if !pressed && self.pressed_keys.contains(&key_code) {
+                // Key release
+                self.pressed_keys.remove(&key_code);
+                events.push(NoteEvent::NoteOff {
+                    timing: 0,
+                    note,
+                    velocity: 0.0,
+                    channel: 0,
+                    voice_id: None,
+                });
+                println!("Real key release: {:?} -> MIDI note {}", key_code, note);
+            }
+        }
+
         events
     }
 }
@@ -477,7 +547,7 @@ impl Plugin for FMSynth {
         },
     ];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
 
     type SysExMessage = ();
@@ -494,17 +564,17 @@ impl Plugin for FMSynth {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        
+
         // For now, assume we're in standalone mode if keyboard input is enabled
         // This is a simple heuristic - in a real implementation, you'd want more robust detection
         self.is_standalone = self.params.keyboard_input_enabled.value();
-        
+
         if self.is_standalone {
             println!("Keyboard input enabled - assuming standalone mode");
         } else {
             println!("Keyboard input disabled - assuming DAW host mode");
         }
-        
+
         self.rebuild_synth();
         true
     }
@@ -538,7 +608,7 @@ impl Plugin for FMSynth {
                             self.midi_note_id = note;
                             self.midi_note_freq = util::midi_note_to_freq(note);
                             self.midi_note_gain.set_target(self.sample_rate, velocity);
-                            self.rebuild_synth();
+                            // DON'T rebuild synth in audio thread - too expensive!
                         }
                         NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
                             self.midi_note_gain.set_target(self.sample_rate, 0.0);
@@ -554,19 +624,14 @@ impl Plugin for FMSynth {
                     break;
                 }
 
-                println!("Received MIDI event: {:?}", event);
+                self.last_midi_event = format!("Received MIDI event: {:?}", event);
 
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
                         self.midi_note_id = note;
                         self.midi_note_freq = util::midi_note_to_freq(note);
                         self.midi_note_gain.set_target(self.sample_rate, velocity);
-
-                        // Update carrier frequencies based on MIDI note
-                        // Note: We can't directly set parameter values from the audio thread
-                        // Instead, we'll use the MIDI note frequency directly in rebuild_synth
-                        self.midi_note_freq = util::midi_note_to_freq(note);
-                        self.rebuild_synth();
+                        // DON'T rebuild synth in audio thread - too expensive!
                     }
                     NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
                         self.midi_note_gain.set_target(self.sample_rate, 0.0);
@@ -582,7 +647,7 @@ impl Plugin for FMSynth {
             let carrier_freq = self.params.carrier_frequency.smoothed.next();
             let mod_index = self.params.modulation_index.smoothed.next();
             let keyboard_enabled = self.params.keyboard_input_enabled.value();
-            
+
             let synth_output = self.process_frame();
             let midi_gain = self.midi_note_gain.next();
 
@@ -599,8 +664,10 @@ impl Plugin for FMSynth {
 
             // Debug output every 10000 samples (about every 0.2 seconds at 44.1kHz)
             if sample_id % 10000 == 0 {
-                println!("Debug - Carrier: {:.1}Hz, Mod Index: {:.1}, Master: {:.1}dB, Keyboard: {}, Output: {:.3}", 
-                         carrier_freq, mod_index, master_gain, keyboard_enabled, final_output);
+                println!(
+                    "Debug - Carrier: {:.1}Hz, Mod Index: {:.1}, Master: {:.1}dB, Keyboard: {}, Output: {:.3}",
+                    carrier_freq, mod_index, master_gain, keyboard_enabled, final_output
+                );
             }
 
             for sample in channel_samples {
@@ -636,11 +703,14 @@ impl Plugin for FMSynth {
                     // Add keyboard input toggle
                     ui.label("Keyboard Input (toggle in standalone mode)");
                     let mut keyboard_enabled = params.keyboard_input_enabled.value();
-                    if ui.checkbox(&mut keyboard_enabled, "Enable Keyboard Input").changed() {
+                    if ui
+                        .checkbox(&mut keyboard_enabled, "Enable Keyboard Input")
+                        .changed()
+                    {
                         setter.set_parameter(&params.keyboard_input_enabled, keyboard_enabled);
                     }
 
-                    // Add a test tone button
+                    // Add test buttons
                     if ui.button("Test Tone (440Hz)").clicked() {
                         println!("Test tone button clicked!");
                     }
@@ -650,7 +720,22 @@ impl Plugin for FMSynth {
                     ui.label("• GUI is working");
                     ui.label("• Keyboard input: Try pressing A-Z keys for notes");
                     ui.label("• Check your system audio settings");
-                    ui.label(format!("• Keyboard enabled: {}", params.keyboard_input_enabled.value()));
+                    ui.label(format!(
+                        "• Keyboard enabled: {}",
+                        params.keyboard_input_enabled.value()
+                    ));
+
+                    // Add MIDI debug info
+                    ui.separator();
+                    ui.label("MIDI Debug:");
+                    ui.label("• Waiting for MIDI input...");
+                    ui.label("• Connect VMPK via IAC Driver");
+
+                    // Add keyboard input instructions
+                    ui.label("Keyboard Mapping:");
+                    ui.label("A-Z keys: Musical notes (A=60, B=62, C=64, etc.)");
+                    ui.label("W,E,T,Y,U,O,P: Sharp notes");
+                    ui.label("S,D,F,G,H,J,K,L: Natural notes");
                 });
             },
         )
